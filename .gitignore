@@ -1,0 +1,15 @@
+# Datos locales de ENEIC: no se versionan.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+*.parquet
+
+# Salidas y entornos locales.
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
