@@ -1,7 +1,13 @@
 pyspark>=3.5,<3.6
+# PySpark 3.5 imports distutils on Python 3.12; setuptools provides the
+# compatibility module before pyspark.ml is imported.
+setuptools>=70,<82
 pandas>=2.1
 openpyxl>=3.1
 matplotlib>=3.8
 seaborn>=0.13
 jupyterlab>=4.0
+nbformat>=5.9
+nbconvert>=7.14
+ipykernel>=6.29
 

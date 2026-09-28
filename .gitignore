@@ -4,6 +4,8 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 *.parquet
+models/*
+!models/.gitkeep
 
 # Salidas y entornos locales.
 .ipynb_checkpoints/
@@ -12,4 +14,6 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+.tools/
+nbconvert*.log
 
