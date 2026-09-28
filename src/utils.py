@@ -93,6 +93,20 @@ KMEANS_FEATURE_COLUMNS: tuple[str, ...] = (
     "antiguedad",
     "horas_semanales",
 )
+SUPERVISED_NUMERIC_PREDICTORS: tuple[str, ...] = (
+    "edad",
+    "antiguedad",
+    "horas_semanales",
+)
+SUPERVISED_CATEGORICAL_PREDICTORS: tuple[str, ...] = (
+    "nivel_educativo",
+    "categoria_ocupacional",
+    "dominio",
+)
+SUPERVISED_PREDICTORS: tuple[str, ...] = (
+    *SUPERVISED_NUMERIC_PREDICTORS,
+    *SUPERVISED_CATEGORICAL_PREDICTORS,
+)
 
 EXCEL_SUFFIXES: tuple[str, ...] = (".xlsx", ".xlsm", ".xls")
 VALID_OCCUPATIONAL_CATEGORIES: tuple[str, ...] = ("1", "2", "3", "4")
@@ -170,6 +184,9 @@ def _is_person_file(path: Path, suffixes: set[str]) -> bool:
         "PERSONA" in name
         and "HOGAR" not in full_name
         and "VIVIENDA" not in full_name
+        and "DICCIONARIO" not in name
+        and "DICTIONARY" not in name
+        and "BOLETA" not in name
     )
 
 
@@ -604,6 +621,12 @@ def _typed_source_expression(source: str, column: Any) -> Any:
         return normalize_code_column(
             column, valid_codes=VALID_OCCUPATIONAL_CATEGORIES
         )
+    if source in {"P03A03A", "DOMINIO"}:
+        # Code 0 is preserved for education.  We do not have a closed list of
+        # valid education/domain codes, so only blank or missing values are
+        # replaced by the explicit category required for model pipelines.
+        F = _require_pyspark_functions()
+        return F.coalesce(normalize_code_column(column), F.lit("DESCONOCIDO"))
     if source in _CODE_SOURCE_COLUMNS:
         return normalize_code_column(column)
     return column
@@ -761,15 +784,13 @@ def missing_summary(
     _require_dataframe_columns(df, requested, "missing_summary")
     F = _require_pyspark_functions()
     total = df.count()
-    aggregate = df.agg(
-        *[
-            F.sum(F.when(_missing_condition(F.col(column)), 1).otherwise(0))
-            .cast("long")
-            .alias(column)
-            for column in requested
-        ]
-    ).first()
-    counts = aggregate.asDict()
+    # Evaluate one condition at a time.  A single wide aggregate repeats the
+    # source-casting expression for every field and can exceed Spark's JVM
+    # code-generation bytecode limit on the ENEIC schema.
+    counts = {
+        column: int(df.where(_missing_condition(F.col(column))).count())
+        for column in requested
+    }
     records = [
         (
             column,
@@ -840,8 +861,19 @@ def _filter_steps(df: Any, names: Mapping[str, str]) -> tuple[Any, list[tuple[in
     category = normalize_code_column(F.col(names["categoria_ocupacional"]))
     integer_months = F.abs(months - F.floor(months)) < F.lit(1e-9)
 
+    # The expressions above are already doubles.  Do not send them through
+    # _numeric_column a second time: repeating the coercion inside every audit
+    # condition creates a very large Catalyst plan for the ENEIC union.
+    def is_finite_double(value: Any) -> Any:
+        return (
+            value.isNotNull()
+            & (~F.isnan(value))
+            & (value != F.lit(float("inf")))
+            & (value != F.lit(float("-inf")))
+        )
+
     return df, [
-        (1, "Edad interpretable (numérica y finita)", _finite_numeric(age)),
+        (1, "Edad interpretable (numérica y finita)", is_finite_double(age)),
         (2, "Edad mayor o igual a 15 años", age >= F.lit(15.0)),
         (3, "Persona ocupada (OCUPADOS == 1)", occupied == F.lit("1")),
         (
@@ -850,19 +882,19 @@ def _filter_steps(df: Any, names: Mapping[str, str]) -> tuple[Any, list[tuple[in
             category.isin(*VALID_OCCUPATIONAL_CATEGORIES),
         ),
         (5, "Salario interpretable (numérico)", salary.isNotNull()),
-        (6, "Salario finito y mayor que cero", _finite_numeric(salary) & (salary > 0)),
-        (7, "Antigüedad en años válida (numérica y finita)", _finite_numeric(years)),
+        (6, "Salario finito y mayor que cero", is_finite_double(salary) & (salary > 0)),
+        (7, "Antigüedad en años válida (numérica y finita)", is_finite_double(years)),
         (
             8,
             "Antigüedad en meses entera entre 0 y 11",
-            _finite_numeric(months)
+            is_finite_double(months)
             & integer_months
             & (months >= 0)
             & (months <= 11),
         ),
-        (9, "Antigüedad total mayor o igual a cero", _finite_numeric(seniority) & (seniority >= 0)),
+        (9, "Antigüedad total mayor o igual a cero", is_finite_double(seniority) & (seniority >= 0)),
         (10, "Antigüedad total no mayor que la edad", seniority <= age),
-        (11, "Horas semanales finitas y mayores que cero", _finite_numeric(hours) & (hours > 0)),
+        (11, "Horas semanales finitas y mayores que cero", is_finite_double(hours) & (hours > 0)),
         (12, "Horas semanales no mayores que 168", hours <= 168),
     ]
 
@@ -881,16 +913,22 @@ def apply_filters_with_audit(
     F = _require_pyspark_functions()
     names = _filter_column_map(columns)
     working, steps = _filter_steps(df, names)
+    # Each audit step is an action.  A local checkpoint truncates the logical
+    # plan between steps, rather than merely caching an ever-growing chain of
+    # filters.  It needs no distributed checkpoint directory and is reliable
+    # for this single Spark session; the caller persists the returned frame.
+    working = working.localCheckpoint(eager=True)
     before = working.count()
     audit_rows: list[tuple[int, str, int, int, int, float | None]] = [
         (0, "Registros originales", before, 0, before, 0.0 if before else None)
     ]
     for step, description, condition in steps:
-        after_frame = working.filter(condition)
+        after_frame = working.filter(condition).localCheckpoint(eager=True)
         after = after_frame.count()
         excluded = before - after
         percentage = (100.0 * excluded / before) if before else None
         audit_rows.append((step, description, before, excluded, after, percentage))
+        working.unpersist()
         working, before = after_frame, after
 
     from pyspark.sql.types import DoubleType, IntegerType, LongType, StringType, StructField, StructType
@@ -1060,6 +1098,276 @@ def prepare_kmeans_features(
     return scaler_model.transform(assembled), assembler, scaler_model
 
 
+def evaluate_regression(
+    predictions: Any,
+    label_col: str = "salario_mensual",
+    prediction_col: str = "prediction",
+) -> dict[str, float]:
+    """Evaluate a regression DataFrame with the three lab metrics in Spark.
+
+    The caller is responsible for supplying a full validation or test
+    DataFrame.  This helper deliberately performs no sampling and does not
+    use pandas, so MAE, RMSE and R² always describe every prediction provided.
+    """
+
+    _require_dataframe_columns(
+        predictions, [label_col, prediction_col], "evaluate_regression"
+    )
+    try:
+        from pyspark.ml.evaluation import RegressionEvaluator
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ImportError("evaluate_regression requiere pyspark.ml.") from exc
+
+    metrics: dict[str, float] = {}
+    for output_name, metric_name in (("MAE", "mae"), ("RMSE", "rmse"), ("R2", "r2")):
+        evaluator = RegressionEvaluator(
+            labelCol=label_col,
+            predictionCol=prediction_col,
+            metricName=metric_name,
+        )
+        metrics[output_name] = float(evaluator.evaluate(predictions))
+    return metrics
+
+
+def make_supervised_pipeline(estimator: Any) -> Any:
+    """Create the leakage-safe feature pipeline mandated by the laboratory.
+
+    The returned, *unfitted* pipeline has exactly the three numeric and three
+    categorical predictors specified in the brief.  Calling ``fit(train)``
+    therefore learns StringIndexer and OneHotEncoder stages only from the
+    training data supplied by the caller.
+    """
+
+    try:
+        from pyspark.ml import Pipeline
+        from pyspark.ml.feature import OneHotEncoder, StringIndexer, VectorAssembler
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ImportError("make_supervised_pipeline requiere pyspark.ml.") from exc
+
+    indexers = [
+        StringIndexer(
+            inputCol=column,
+            outputCol=f"{column}__index",
+            handleInvalid="keep",
+        )
+        for column in SUPERVISED_CATEGORICAL_PREDICTORS
+    ]
+    encoded_columns = [f"{column}__ohe" for column in SUPERVISED_CATEGORICAL_PREDICTORS]
+    encoder = OneHotEncoder(
+        inputCols=[f"{column}__index" for column in SUPERVISED_CATEGORICAL_PREDICTORS],
+        outputCols=encoded_columns,
+        handleInvalid="keep",
+        dropLast=True,
+    )
+    assembler = VectorAssembler(
+        inputCols=[*SUPERVISED_NUMERIC_PREDICTORS, *encoded_columns],
+        outputCol="features",
+        handleInvalid="error",
+    )
+    return Pipeline(stages=[*indexers, encoder, assembler, estimator])
+
+
+def build_linear_regression_pipeline(
+    *,
+    reg_param: float,
+    elastic_net_param: float,
+    max_iter: int = 100,
+    label_col: str = "salario_mensual",
+    prediction_col: str = "prediction",
+) -> Any:
+    """Return a fresh regularized Spark LinearRegression pipeline."""
+
+    try:
+        from pyspark.ml.regression import LinearRegression
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ImportError("build_linear_regression_pipeline requiere pyspark.ml.") from exc
+    estimator = LinearRegression(
+        featuresCol="features",
+        labelCol=label_col,
+        predictionCol=prediction_col,
+        regParam=float(reg_param),
+        elasticNetParam=float(elastic_net_param),
+        maxIter=int(max_iter),
+        standardization=True,
+    )
+    return make_supervised_pipeline(estimator)
+
+
+def build_random_forest_pipeline(
+    *,
+    num_trees: int,
+    max_depth: int,
+    seed: int = SEED,
+    max_bins: int = 16,
+    max_memory_in_mb: int = 64,
+    label_col: str = "salario_mensual",
+    prediction_col: str = "prediction",
+) -> Any:
+    """Return a fresh, bounded-memory Spark RF pipeline without scaling.
+
+    The ENEIC notebook runs locally on Windows.  Keeping histogram bins and
+    per-task RF memory bounded avoids exhausting the JVM when multiple local
+    workers build tree histograms concurrently; it does not alter the six
+    required predictors or use any test data during fitting.
+    """
+
+    try:
+        from pyspark.ml.regression import RandomForestRegressor
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ImportError("build_random_forest_pipeline requiere pyspark.ml.") from exc
+    estimator = RandomForestRegressor(
+        featuresCol="features",
+        labelCol=label_col,
+        predictionCol=prediction_col,
+        numTrees=int(num_trees),
+        maxDepth=int(max_depth),
+        seed=int(seed),
+        maxBins=int(max_bins),
+        maxMemoryInMB=int(max_memory_in_mb),
+    )
+    return make_supervised_pipeline(estimator)
+
+
+def with_residual(
+    predictions: Any,
+    *,
+    label_col: str = "salario_mensual",
+    prediction_col: str = "prediction",
+    residual_col: str = "residuo",
+) -> Any:
+    """Add ``real - prediction`` so positive values mean underprediction."""
+
+    _require_dataframe_columns(predictions, [label_col, prediction_col], "with_residual")
+    F = _require_pyspark_functions()
+    return predictions.withColumn(
+        residual_col,
+        _numeric_column(F.col(label_col)) - _numeric_column(F.col(prediction_col)),
+    )
+
+
+def grouped_error_metrics(
+    predictions: Any,
+    group_col: str,
+    *,
+    label_col: str = "salario_mensual",
+    prediction_col: str = "prediction",
+    residual_col: str = "residuo",
+) -> Any:
+    """Calculate count, MAE and mean signed error by one categorical group."""
+
+    _require_dataframe_columns(
+        predictions, [group_col, label_col, prediction_col], "grouped_error_metrics"
+    )
+    F = _require_pyspark_functions()
+    with_error = (
+        predictions
+        if residual_col in predictions.columns
+        else with_residual(
+            predictions,
+            label_col=label_col,
+            prediction_col=prediction_col,
+            residual_col=residual_col,
+        )
+    )
+    group = F.coalesce(F.trim(F.col(group_col).cast("string")), F.lit("DESCONOCIDO"))
+    return (
+        with_error.withColumn("_grupo", group)
+        .groupBy("_grupo")
+        .agg(
+            F.count("*").alias("n"),
+            F.avg(F.abs(F.col(residual_col))).alias("MAE"),
+            F.avg(F.col(residual_col)).alias("error_medio"),
+        )
+        .withColumnRenamed("_grupo", group_col)
+        .orderBy(F.desc("n"), F.asc(group_col))
+    )
+
+
+def deterministic_sample(
+    df: Any,
+    *,
+    max_rows: int = 5_000,
+    seed: int = SEED,
+    key_columns: Sequence[str] = ("periodo_archivo", "NUM_HOGAR", "NUM_PERSONA"),
+) -> Any:
+    """Select one deterministic Spark sample, retaining it for multiple models.
+
+    The requested ENEIC identity is hashed with the seed.  The full result is
+    still evaluated elsewhere; this function is only for bounded graphics.
+    """
+
+    if max_rows <= 0:
+        raise ValueError("max_rows debe ser positivo.")
+    _require_dataframe_columns(df, list(key_columns), "deterministic_sample")
+    F = _require_pyspark_functions()
+    serialised = [F.lit(str(seed))] + [
+        F.coalesce(F.col(column).cast("string"), F.lit("<NULO>"))
+        for column in key_columns
+    ]
+    sample_hash = F.sha2(F.concat_ws("¦", *serialised), 256)
+    return (
+        df.withColumn("__sample_hash", sample_hash)
+        .orderBy(F.col("__sample_hash"), *[F.col(column).cast("string") for column in key_columns])
+        .limit(int(max_rows))
+        .drop("__sample_hash")
+    )
+
+
+def write_small_table(frame: Any, destination: str | Path, *, max_rows: int = 10_000) -> Path:
+    """Write a small aggregate to one CSV after enforcing a row-count ceiling."""
+
+    if max_rows <= 0:
+        raise ValueError("max_rows debe ser positivo.")
+    count = frame.limit(int(max_rows) + 1).count()
+    if count > max_rows:
+        raise ValueError(
+            f"La tabla tiene mÃ¡s de {max_rows:,} filas; no debe convertirse a pandas."
+        )
+    destination_path = Path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.toPandas().to_csv(destination_path, index=False, encoding="utf-8-sig")
+    return destination_path
+
+
+def feature_importance_table(
+    random_forest_model: Any,
+    transformed_frame: Any,
+    *,
+    features_col: str = "features",
+) -> Any:
+    """Return a small pandas table of RF importances using Spark metadata when present.
+
+    When Spark does not expose an encoded attribute name, the table labels only
+    its vector position as ``feature_<index>``; it does not guess a category.
+    """
+
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        raise ImportError("feature_importance_table requiere pandas.") from exc
+    if features_col not in transformed_frame.columns:
+        raise ValueError(f"No existe la columna de features: {features_col}")
+    metadata = transformed_frame.schema[features_col].metadata.get("ml_attr", {})
+    attributes = metadata.get("attrs", {})
+    names: dict[int, str] = {}
+    for attribute_group in attributes.values():
+        for attribute in attribute_group:
+            index = attribute.get("idx")
+            name = attribute.get("name")
+            if index is not None and name:
+                names[int(index)] = str(name)
+    importances = list(random_forest_model.featureImportances)
+    rows = [
+        {
+            "indice": index,
+            "feature": names.get(index, f"feature_{index}"),
+            "importancia": float(importance),
+        }
+        for index, importance in enumerate(importances)
+    ]
+    return pd.DataFrame(rows).sort_values("importancia", ascending=False, ignore_index=True)
+
+
 __all__ = [
     "EXCEL_SUFFIXES",
     "KMEANS_FEATURE_COLUMNS",
@@ -1073,19 +1381,31 @@ __all__ = [
     "SELECTED_COLUMNS",
     "STANDARD_ANALYTIC_COLUMNS",
     "STANDARD_COLUMN_MAP",
+    "SUPERVISED_CATEGORICAL_PREDICTORS",
+    "SUPERVISED_NUMERIC_PREDICTORS",
+    "SUPERVISED_PREDICTORS",
     "VALID_OCCUPATIONAL_CATEGORIES",
     "RequiredColumnsError",
     "apply_filters_with_audit",
+    "build_linear_regression_pipeline",
+    "build_random_forest_pipeline",
+    "deterministic_sample",
     "descriptive_statistics",
     "detect_period_from_filename",
+    "evaluate_regression",
+    "feature_importance_table",
     "filter_with_audit",
     "find_person_files",
+    "grouped_error_metrics",
     "load_excel_to_spark",
     "load_person_period",
+    "make_supervised_pipeline",
     "median_by_group",
     "missing_summary",
     "normalize_code",
     "normalize_code_column",
     "prepare_kmeans_features",
     "read_excel_columns",
+    "with_residual",
+    "write_small_table",
 ]
