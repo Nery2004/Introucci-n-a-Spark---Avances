@@ -1,0 +1,27 @@
+﻿conjunto,paso,descripcion,registros_antes,registros_excluidos,registros_despues,porcentaje_excluido
+2025,0,Registros originales,203676,0,203676,0.0
+2025,1,Edad interpretable (numérica y finita),203676,0,203676,0.0
+2025,2,Edad mayor o igual a 15 años,203676,62886,140790,30.875508160018853
+2025,3,Persona ocupada (OCUPADOS == 1),140790,52568,88222,37.337879110732295
+2025,4,"Categoría ocupacional válida (1, 2, 3 o 4)",88222,35197,53025,39.89594432227789
+2025,5,Salario interpretable (numérico),53025,0,53025,0.0
+2025,6,Salario finito y mayor que cero,53025,0,53025,0.0
+2025,7,Antigüedad en años válida (numérica y finita),53025,0,53025,0.0
+2025,8,Antigüedad en meses entera entre 0 y 11,53025,0,53025,0.0
+2025,9,Antigüedad total mayor o igual a cero,53025,0,53025,0.0
+2025,10,Antigüedad total no mayor que la edad,53025,0,53025,0.0
+2025,11,Horas semanales finitas y mayores que cero,53025,0,53025,0.0
+2025,12,Horas semanales no mayores que 168,53025,0,53025,0.0
+2026T1,0,Registros originales,49843,0,49843,0.0
+2026T1,1,Edad interpretable (numérica y finita),49843,0,49843,0.0
+2026T1,2,Edad mayor o igual a 15 años,49843,14803,35040,29.699255662781134
+2026T1,3,Persona ocupada (OCUPADOS == 1),35040,13306,21734,37.97374429223744
+2026T1,4,"Categoría ocupacional válida (1, 2, 3 o 4)",21734,8476,13258,38.99880371767737
+2026T1,5,Salario interpretable (numérico),13258,0,13258,0.0
+2026T1,6,Salario finito y mayor que cero,13258,0,13258,0.0
+2026T1,7,Antigüedad en años válida (numérica y finita),13258,0,13258,0.0
+2026T1,8,Antigüedad en meses entera entre 0 y 11,13258,0,13258,0.0
+2026T1,9,Antigüedad total mayor o igual a cero,13258,0,13258,0.0
+2026T1,10,Antigüedad total no mayor que la edad,13258,0,13258,0.0
+2026T1,11,Horas semanales finitas y mayores que cero,13258,0,13258,0.0
+2026T1,12,Horas semanales no mayores que 168,13258,0,13258,0.0

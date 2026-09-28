@@ -1,0 +1,16 @@
+﻿categoria_ocupacional_etiqueta,n,porcentaje,variable,nivel_educativo,dominio
+2 - Empleado de empresa privada,28702,54.12918434700613,categoria_ocupacional_etiqueta,,
+3 - Jornalero o peón,13842,26.104667609618105,categoria_ocupacional_etiqueta,,
+1 - Empleado de gobierno,6575,12.3998114097124,categoria_ocupacional_etiqueta,,
+4 - Servicio doméstico,3906,7.366336633663367,categoria_ocupacional_etiqueta,,
+,16851,31.77934936350778,nivel_educativo,4,
+,15822,29.838755304101838,nivel_educativo,2,
+,8249,15.556812824139557,nivel_educativo,3,
+,6818,12.858085808580858,nivel_educativo,5,
+,3995,7.534181989627534,nivel_educativo,0,
+,771,1.454031117397454,nivel_educativo,6,
+,459,0.8656294200848657,nivel_educativo,1,
+,60,0.11315417256011315,nivel_educativo,7,
+,22072,41.625648279113626,dominio,,1
+,20146,37.993399339933994,dominio,,2
+,10807,20.38095238095238,dominio,,3
